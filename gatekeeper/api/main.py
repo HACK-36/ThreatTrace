@@ -20,6 +20,9 @@ from gatekeeper.ml.anomaly_detector import AnomalyDetector, LSTMBehavioralClassi
 from shared.events.schemas import (
     POITaggedEvent, RequestData, ScoreData, GeoIPData, WAFRule
 )
+from shared.auth.dependencies import get_current_service, require_roles, TokenData
+from shared.utils.metrics_router import router as metrics_router
+from shared.utils.metrics import track_request_metrics, threats_detected
 
 app = FastAPI(
     title="Cerberus Gatekeeper API",
@@ -35,6 +38,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include metrics router
+app.include_router(metrics_router)
 
 # Security
 security = HTTPBearer()
@@ -89,6 +95,7 @@ class RuleListResponse(BaseModel):
 # API endpoints
 
 @app.get("/health")
+@track_request_metrics("gatekeeper", "/health", "GET")
 async def health_check():
     """Health check endpoint"""
     return {
@@ -100,17 +107,22 @@ async def health_check():
 
 
 @app.post("/api/v1/inspect", response_model=InspectResponse)
-async def inspect_request(req: InspectRequest):
+@track_request_metrics("gatekeeper", "/api/v1/inspect", "POST")
+async def inspect_request(
+    req: InspectRequest,
+    auth: TokenData = Depends(get_current_service)
+):
     """
     Inspect a request for threats
     
-    This is the main entry point for WAF analysis
+    This is the main entry point for WAF analysis.
+    Requires service authentication (Switch or other authorized services).
     """
     # Step 1: Check against existing WAF rules
     modsecurity_score, blocked_by_rule = check_waf_rules(req)
     
     if blocked_by_rule:
-        return InspectResponse(
+        response = InspectResponse(
             action="block",
             session_id=req.session_id,
             scores=ScoreData(modsecurity=modsecurity_score, ml_anomaly=0.0, combined=modsecurity_score),
@@ -118,6 +130,8 @@ async def inspect_request(req: InspectRequest):
             reason=f"Blocked by rule: {blocked_by_rule}",
             event_id=None
         )
+        threats_detected.labels(service="gatekeeper", threat_type="waf_rule", action="block").inc()
+        return response
     
     # Step 2: Extract features for ML
     request_dict = {
@@ -170,6 +184,9 @@ async def inspect_request(req: InspectRequest):
     event_id = None
     if action == "tag_poi":
         event_id = emit_poi_event(req, scores, tags)
+        threats_detected.labels(service="gatekeeper", threat_type="ml_anomaly", action=action).inc()
+    elif action == "block":
+        threats_detected.labels(service="gatekeeper", threat_type="ml_anomaly", action=action).inc()
     
     return InspectResponse(
         action=action,
@@ -184,14 +201,13 @@ async def inspect_request(req: InspectRequest):
 @app.post("/api/v1/gatekeeper/rules", status_code=201)
 async def create_rule(
     req: RuleCreateRequest,
-    credentials: HTTPAuthorizationCredentials = Security(security)
+    auth: TokenData = Depends(require_roles(["admin", "service"]))
 ):
     """
     Create a new WAF rule
     
-    Requires authentication (mTLS or Bearer token in production)
+    Requires admin or service role.
     """
-    # In production: verify credentials, check RBAC
     
     rule = req.rule
     
@@ -230,9 +246,9 @@ async def get_rule(rule_id: str):
 @app.delete("/api/v1/gatekeeper/rules/{rule_id}")
 async def delete_rule(
     rule_id: str,
-    credentials: HTTPAuthorizationCredentials = Security(security)
+    auth: TokenData = Depends(require_roles(["admin"]))
 ):
-    """Delete a WAF rule"""
+    """Delete a WAF rule (admin only)"""
     if rule_id not in active_rules:
         raise HTTPException(status_code=404, detail="Rule not found")
     
@@ -247,9 +263,9 @@ async def delete_rule(
 async def toggle_rule(
     rule_id: str,
     enabled: bool,
-    credentials: HTTPAuthorizationCredentials = Security(security)
+    auth: TokenData = Depends(require_roles(["admin"]))
 ):
-    """Enable or disable a rule"""
+    """Enable or disable a rule (admin only)"""
     if rule_id not in active_rules:
         raise HTTPException(status_code=404, detail="Rule not found")
     
