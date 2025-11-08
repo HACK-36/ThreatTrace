@@ -2,7 +2,7 @@
 Sentinel API - Threat Twin AI Analysis Engine
 Orchestrates profiling, simulation, rule generation, and policy decisions
 """
-from fastapi import FastAPI, HTTPException, Security, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Security, BackgroundTasks, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Literal
@@ -11,6 +11,7 @@ import os
 from datetime import datetime
 import json
 import requests
+import logging
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
@@ -21,12 +22,27 @@ from shared.events.schemas import (
     WAFRule, SimulationCompleteEvent, RuleGeneratedEvent,
     SimulationResult, AttackerProfile
 )
+from shared.auth.dependencies import get_current_service, require_roles, TokenData
+from sentinel.api.evidence_consumer import start_evidence_consumer
+from shared.utils.metrics_router import router as metrics_router
+from shared.utils.metrics import (
+    track_request_metrics,
+    record_simulation,
+    record_rule_generation,
+    record_threat_detection
+)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Cerberus Sentinel API",
     description="AI-driven threat analysis and response",
     version="1.0.0"
 )
+
+# Include metrics router
+app.include_router(metrics_router)
 
 security = HTTPBearer()
 
@@ -39,6 +55,9 @@ rule_generator = RuleGenerator()
 simulation_results: Dict[str, Dict] = {}
 generated_rules: Dict[str, WAFRule] = {}
 attacker_profiles: Dict[str, Dict] = {}
+
+# Evidence consumer (started on app startup)
+evidence_consumer = None
 
 # Configuration
 GATEKEEPER_API_URL = os.getenv("GATEKEEPER_API_URL", "http://gatekeeper:8000")
@@ -89,9 +108,28 @@ class PolicyDecision(BaseModel):
     confidence: float
 
 
+# Startup Event
+
+@app.on_event("startup")
+async def startup_event():
+    """Start evidence consumer on app startup"""
+    global evidence_consumer
+    try:
+        evidence_consumer = start_evidence_consumer(
+            profiler=profiler,
+            simulator=simulator,
+            rule_generator=rule_generator,
+            storage_dict=attacker_profiles
+        )
+        logger.info("Evidence consumer started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start evidence consumer: {e}")
+
+
 # API Endpoints
 
 @app.get("/health")
+@track_request_metrics("sentinel", "/health", "GET")
 async def health_check():
     """Health check"""
     return {
@@ -100,16 +138,22 @@ async def health_check():
         "timestamp": datetime.utcnow().isoformat(),
         "simulations": len(simulation_results),
         "rules_generated": len(generated_rules),
-        "profiles": len(attacker_profiles)
+        "profiles": len(attacker_profiles),
+        "evidence_consumer": "running" if evidence_consumer and evidence_consumer.running else "stopped"
     }
 
 
 @app.post("/api/v1/sentinel/profile")
-async def profile_session(req: ProfileRequest):
+@track_request_metrics("sentinel", "/api/v1/sentinel/profile", "POST")
+async def profile_session(
+    req: ProfileRequest,
+    auth: TokenData = Depends(get_current_service)
+):
     """
     Profile an attacker session
     
-    Analyzes behavior and maps to MITRE ATT&CK TTPs
+    Analyzes behavior and maps to MITRE ATT&CK TTPs.
+    Requires service authentication.
     """
     print(f"[SENTINEL] Profiling session: {req.session_id}")
     
@@ -128,14 +172,17 @@ async def profile_session(req: ProfileRequest):
 
 
 @app.post("/api/v1/sentinel/simulate", response_model=SimulateResponse)
+@track_request_metrics("sentinel", "/api/v1/sentinel/simulate", "POST")
 async def simulate_payload(
     req: SimulateRequest,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    auth: TokenData = Depends(get_current_service)
 ):
     """
     Simulate a payload in sandbox (async)
     
-    Returns job_id immediately, simulation runs in background
+    Returns job_id immediately, simulation runs in background.
+    Requires service authentication.
     """
     job_id = f"sim_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
     
@@ -165,6 +212,7 @@ async def simulate_payload(
 
 
 @app.get("/api/v1/sentinel/sim-result/{job_id}")
+@track_request_metrics("sentinel", "/api/v1/sentinel/sim-result/{job_id}", "GET")
 async def get_simulation_result(job_id: str):
     """Get simulation result"""
     if job_id not in simulation_results:
@@ -174,6 +222,7 @@ async def get_simulation_result(job_id: str):
 
 
 @app.post("/api/v1/sentinel/rule-propose")
+@track_request_metrics("sentinel", "/api/v1/sentinel/rule-propose", "POST")
 async def propose_rule(req: RuleProposeRequest):
     """
     Propose a WAF rule based on simulation result
@@ -206,6 +255,7 @@ async def propose_rule(req: RuleProposeRequest):
 
 
 @app.post("/api/v1/sentinel/rule-apply", response_model=PolicyDecision)
+@track_request_metrics("sentinel", "/api/v1/sentinel/rule-apply", "POST")
 async def apply_rule(
     req: RuleApplyRequest,
     credentials: HTTPAuthorizationCredentials = Security(security)
@@ -242,10 +292,18 @@ async def apply_rule(
     else:
         print(f"[SENTINEL] Rule logged only: {rule.rule_id}")
     
+    record_rule_generation(
+        service="sentinel",
+        action=rule.action,
+        confidence=rule.confidence,
+        auto_applied=decision["decision"] == "auto_applied"
+    )
+
     return PolicyDecision(**decision)
 
 
 @app.get("/api/v1/sentinel/rules")
+@track_request_metrics("sentinel", "/api/v1/sentinel/rules", "GET")
 async def list_rules():
     """List all generated rules"""
     return {
@@ -255,6 +313,7 @@ async def list_rules():
 
 
 @app.get("/api/v1/sentinel/profiles")
+@track_request_metrics("sentinel", "/api/v1/sentinel/profiles", "GET")
 async def list_profiles():
     """List all attacker profiles"""
     return {
@@ -264,6 +323,7 @@ async def list_profiles():
 
 
 @app.get("/api/v1/sentinel/stats")
+@track_request_metrics("sentinel", "/api/v1/sentinel/stats", "GET")
 async def get_stats():
     """Get Sentinel statistics"""
     completed_sims = sum(1 for s in simulation_results.values() if s.get("status") == "completed")
@@ -296,6 +356,12 @@ def run_simulation(job_id: str, payload: Dict, shadow_ref: str, metadata: Dict):
         simulation_results[job_id]["status"] = "completed"
         simulation_results[job_id]["result"] = result
         simulation_results[job_id]["completed_at"] = datetime.utcnow().isoformat()
+
+        # Record metrics
+        verdict = result.get("verdict", "unknown")
+        attack_type = result.get("attack_type", "unknown")
+        duration_seconds = result.get("execution_time_ms", 0) / 1000.0
+        record_simulation("sentinel", attack_type, verdict, duration_seconds)
         
         # Emit event
         emit_simulation_event(job_id, payload, result)
@@ -304,6 +370,7 @@ def run_simulation(job_id: str, payload: Dict, shadow_ref: str, metadata: Dict):
         
         # If exploit detected, auto-generate rule
         if result["verdict"] == "exploit_possible":
+            record_threat_detection("sentinel", result.get("attack_type", "unknown"), "exploit_detected", None)
             auto_generate_rule(payload, result, metadata)
     
     except Exception as e:
@@ -337,6 +404,13 @@ def auto_generate_rule(payload: Dict, sim_result: Dict, metadata: Dict):
         else:
             emit_rule_generated_event(rule, decision["decision"])
             print(f"[SENTINEL] Auto-generated rule (pending review): {rule.rule_id}")
+
+        record_rule_generation(
+            service="sentinel",
+            action=rule.action,
+            confidence=rule.confidence,
+            auto_applied=decision["decision"] == "auto_applied"
+        )
     
     except Exception as e:
         print(f"[SENTINEL] Failed to auto-generate rule: {e}")
