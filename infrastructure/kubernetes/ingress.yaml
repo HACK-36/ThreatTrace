@@ -1,0 +1,62 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cerberus-ingress
+  namespace: cerberus
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - cerberus.example.com
+    secretName: cerberus-tls
+  rules:
+  - host: cerberus.example.com
+    http:
+      paths:
+      # Gatekeeper API
+      - path: /api/v1/inspect
+        pathType: Prefix
+        backend:
+          service:
+            name: gatekeeper
+            port:
+              number: 8000
+      - path: /api/v1/gatekeeper
+        pathType: Prefix
+        backend:
+          service:
+            name: gatekeeper
+            port:
+              number: 8000
+      
+      # Sentinel API (admin only)
+      - path: /api/v1/sentinel
+        pathType: Prefix
+        backend:
+          service:
+            name: sentinel
+            port:
+              number: 8003
+      
+      # MinIO Console (admin only)
+      - path: /minio
+        pathType: Prefix
+        backend:
+          service:
+            name: minio
+            port:
+              number: 9001
+      
+      # Prometheus (monitoring)
+      - path: /prometheus
+        pathType: Prefix
+        backend:
+          service:
+            name: prometheus
+            port:
+              number: 9090

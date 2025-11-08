@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gatekeeper
+  namespace: cerberus
+  labels:
+    app: gatekeeper
+    component: waf
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gatekeeper
+  template:
+    metadata:
+      labels:
+        app: gatekeeper
+        component: waf
+    spec:
+      containers:
+      - name: gatekeeper
+        image: cerberus/gatekeeper:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          valueFrom:
+            configMapKeyRef:
+              name: cerberus-config
+              key: kafka-bootstrap-servers
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: cerberus-config
+              key: redis-url
+        - name: POSTGRES_URL
+          valueFrom:
+            configMapKeyRef:
+              name: cerberus-config
+              key: postgres-url
+        - name: JWT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cerberus-secrets
+              key: jwt-secret-key
+        - name: GATEKEEPER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cerberus-secrets
+              key: gatekeeper-api-key
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        volumeMounts:
+        - name: data
+          mountPath: /app/data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: gatekeeper-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gatekeeper
+  namespace: cerberus
+  labels:
+    app: gatekeeper
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  - port: 9090
+    targetPort: 9090
+    protocol: TCP
+    name: metrics
+  selector:
+    app: gatekeeper
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gatekeeper-data
+  namespace: cerberus
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

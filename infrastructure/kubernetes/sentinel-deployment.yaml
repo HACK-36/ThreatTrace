@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sentinel
+  namespace: cerberus
+  labels:
+    app: sentinel
+    component: ai-analysis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sentinel
+  template:
+    metadata:
+      labels:
+        app: sentinel
+        component: ai-analysis
+    spec:
+      containers:
+      - name: sentinel
+        image: cerberus/sentinel:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8003
+          name: http
+          protocol: TCP
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          valueFrom:
+            configMapKeyRef:
+              name: cerberus-config
+              key: kafka-bootstrap-servers
+        - name: POSTGRES_URL
+          valueFrom:
+            configMapKeyRef:
+              name: cerberus-config
+              key: postgres-url
+        - name: GATEKEEPER_API_URL
+          valueFrom:
+            configMapKeyRef:
+              name: cerberus-config
+              key: gatekeeper-url
+        - name: MINIO_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: cerberus-config
+              key: minio-endpoint
+        - name: MINIO_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cerberus-secrets
+              key: minio-access-key
+        - name: MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cerberus-secrets
+              key: minio-secret-key
+        - name: JWT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cerberus-secrets
+              key: jwt-secret-key
+        - name: SENTINEL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cerberus-secrets
+              key: sentinel-api-key
+        - name: GATEKEEPER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cerberus-secrets
+              key: gatekeeper-api-key
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "1000m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8003
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8003
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        volumeMounts:
+        - name: data
+          mountPath: /app/data
+        - name: docker-socket
+          mountPath: /var/run/docker.sock
+        securityContext:
+          privileged: true  # Required for Docker-in-Docker
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: sentinel-data
+      - name: docker-socket
+        hostPath:
+          path: /var/run/docker.sock
+          type: Socket
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel
+  namespace: cerberus
+  labels:
+    app: sentinel
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8003
+    targetPort: 8003
+    protocol: TCP
+    name: http
+  - port: 9090
+    targetPort: 9090
+    protocol: TCP
+    name: metrics
+  selector:
+    app: sentinel
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sentinel-data
+  namespace: cerberus
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

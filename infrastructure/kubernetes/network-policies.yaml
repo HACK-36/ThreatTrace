@@ -1,0 +1,172 @@
+# Network Policy for Labyrinth - Isolated from external access
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: labyrinth-isolation
+  namespace: cerberus
+spec:
+  podSelector:
+    matchLabels:
+      app: labyrinth
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow from Switch only
+  - from:
+    - podSelector:
+        matchLabels:
+          app: switch
+    ports:
+    - protocol: TCP
+      port: 8002
+  # Allow metrics scraping from Prometheus
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 9090
+  egress:
+  # Allow to Kafka
+  - to:
+    - podSelector:
+        matchLabels:
+          app: kafka
+    ports:
+    - protocol: TCP
+      port: 9092
+  # Allow to MinIO
+  - to:
+    - podSelector:
+        matchLabels:
+          app: minio
+    ports:
+    - protocol: TCP
+      port: 9000
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: UDP
+      port: 53
+
+---
+# Network Policy for Gatekeeper - Allow external traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gatekeeper-ingress
+  namespace: cerberus
+spec:
+  podSelector:
+    matchLabels:
+      app: gatekeeper
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow from ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+  # Allow from Switch
+  - from:
+    - podSelector:
+        matchLabels:
+          app: switch
+    ports:
+    - protocol: TCP
+      port: 8000
+  # Allow metrics scraping
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 9090
+  egress:
+  # Allow to Kafka
+  - to:
+    - podSelector:
+        matchLabels:
+          app: kafka
+  # Allow to Redis
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+  # Allow to PostgreSQL
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: UDP
+      port: 53
+
+---
+# Network Policy for Sentinel
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sentinel-policy
+  namespace: cerberus
+spec:
+  podSelector:
+    matchLabels:
+      app: sentinel
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow from Switch and Gatekeeper
+  - from:
+    - podSelector:
+        matchLabels:
+          app: switch
+    - podSelector:
+        matchLabels:
+          app: gatekeeper
+    ports:
+    - protocol: TCP
+      port: 8003
+  # Allow metrics scraping
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 9090
+  egress:
+  # Allow to all internal services
+  - to:
+    - podSelector: {}
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow Docker socket (for sandbox)
+  - to:
+    - podSelector: {}
+
+---
+# Default deny all ingress for namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: cerberus
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress

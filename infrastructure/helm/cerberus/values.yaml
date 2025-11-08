@@ -1,0 +1,298 @@
+# Default values for Cerberus
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Global settings
+global:
+  environment: production
+  imageRegistry: docker.io
+  imagePullPolicy: IfNotPresent
+
+# Namespace
+namespace: cerberus
+
+# Image configuration
+images:
+  gatekeeper:
+    repository: cerberus/gatekeeper
+    tag: "1.0.0"
+  switch:
+    repository: cerberus/switch
+    tag: "1.0.0"
+  labyrinth:
+    repository: cerberus/labyrinth
+    tag: "1.0.0"
+  sentinel:
+    repository: cerberus/sentinel
+    tag: "1.0.0"
+
+# Secrets (CHANGE IN PRODUCTION)
+secrets:
+  postgres:
+    password: "cerberus_password"
+  minio:
+    accessKey: "cerberus"
+    secretKey: "cerberus_minio_password"
+  jwt:
+    secretKey: "cerberus-production-secret-key-min-32-characters-long"
+  apiKeys:
+    gatekeeper: "gk_prod_change_me"
+    switch: "sw_prod_change_me"
+    labyrinth: "lb_prod_change_me"
+    sentinel: "st_prod_change_me"
+    warroom: "wr_prod_change_me"
+
+# Gatekeeper configuration
+gatekeeper:
+  enabled: true
+  replicaCount: 2
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+  service:
+    type: ClusterIP
+    port: 8000
+    metricsPort: 9090
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+# Switch configuration
+switch:
+  enabled: true
+  replicaCount: 2
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  service:
+    type: ClusterIP
+    port: 8001
+    metricsPort: 9090
+
+# Labyrinth configuration
+labyrinth:
+  enabled: true
+  replicaCount: 2
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+  service:
+    type: ClusterIP
+    port: 8002
+    metricsPort: 9090
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+
+# Sentinel configuration
+sentinel:
+  enabled: true
+  replicaCount: 1
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "1000m"
+    limits:
+      memory: "2Gi"
+      cpu: "2000m"
+  service:
+    type: ClusterIP
+    port: 8003
+    metricsPort: 9090
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+  sandbox:
+    enabled: true
+    privileged: true
+
+# PostgreSQL configuration
+postgresql:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "15-alpine"
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+
+# Redis configuration
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+
+# MinIO configuration
+minio:
+  enabled: true
+  image:
+    repository: minio/minio
+    tag: "latest"
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+  persistence:
+    enabled: true
+    size: 50Gi
+    storageClass: ""
+  service:
+    apiPort: 9000
+    consolePort: 9001
+
+# Kafka configuration
+kafka:
+  enabled: true
+  image:
+    repository: confluentinc/cp-kafka
+    tag: "7.5.0"
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+
+# Prometheus configuration
+prometheus:
+  enabled: true
+  image:
+    repository: prom/prometheus
+    tag: "latest"
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+  service:
+    port: 9090
+
+# Grafana configuration
+grafana:
+  enabled: true
+  image:
+    repository: grafana/grafana
+    tag: "latest"
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "200m"
+    limits:
+      memory: "512Mi"
+      cpu: "400m"
+  service:
+    port: 3000
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+  hosts:
+    - host: cerberus.example.com
+      paths:
+        - path: /api/v1/inspect
+          service: gatekeeper
+          port: 8000
+        - path: /api/v1/gatekeeper
+          service: gatekeeper
+          port: 8000
+        - path: /api/v1/sentinel
+          service: sentinel
+          port: 8003
+  tls:
+    - secretName: cerberus-tls
+      hosts:
+        - cerberus.example.com
+
+# Network Policies
+networkPolicies:
+  enabled: true
+  labyrinthIsolation: true
+  defaultDenyIngress: true
+
+# Monitoring
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+  prometheusRule:
+    enabled: true
+
+# Security
+security:
+  podSecurityPolicy:
+    enabled: true
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+
+# Resource quotas
+resourceQuotas:
+  enabled: false
+  requests:
+    cpu: "10"
+    memory: "20Gi"
+  limits:
+    cpu: "20"
+    memory: "40Gi"

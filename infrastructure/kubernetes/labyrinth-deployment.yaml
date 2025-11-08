@@ -1,0 +1,126 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: labyrinth
+  namespace: cerberus
+  labels:
+    app: labyrinth
+    component: honeypot
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: labyrinth
+  template:
+    metadata:
+      labels:
+        app: labyrinth
+        component: honeypot
+    spec:
+      containers:
+      - name: labyrinth
+        image: cerberus/labyrinth:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8002
+          name: http
+          protocol: TCP
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          valueFrom:
+            configMapKeyRef:
+              name: cerberus-config
+              key: kafka-bootstrap-servers
+        - name: MINIO_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: cerberus-config
+              key: minio-endpoint
+        - name: MINIO_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cerberus-secrets
+              key: minio-access-key
+        - name: MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cerberus-secrets
+              key: minio-secret-key
+        - name: JWT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cerberus-secrets
+              key: jwt-secret-key
+        - name: LABYRINTH_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cerberus-secrets
+              key: labyrinth-api-key
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8002
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8002
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        volumeMounts:
+        - name: data
+          mountPath: /app/data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: labyrinth-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: labyrinth
+  namespace: cerberus
+  labels:
+    app: labyrinth
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8002
+    targetPort: 8002
+    protocol: TCP
+    name: http
+  - port: 9090
+    targetPort: 9090
+    protocol: TCP
+    name: metrics
+  selector:
+    app: labyrinth
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: labyrinth-data
+  namespace: cerberus
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
