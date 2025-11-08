@@ -13,12 +13,17 @@ import os
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from shared.events.schemas import SessionPinnedEvent
+from shared.utils.metrics_router import router as metrics_router
+from shared.utils.metrics import track_request_metrics
 
 app = FastAPI(
     title="Cerberus Switch API",
     description="Session routing and pinning management",
     version="1.0.0"
 )
+
+# Include metrics router
+app.include_router(metrics_router)
 
 security = HTTPBearer()
 
@@ -89,6 +94,7 @@ async def health_check():
 
 
 @app.post("/api/v1/switch/pin", response_model=PinSessionResponse)
+@track_request_metrics("switch", "/api/v1/switch/pin", "POST")
 async def pin_session(
     req: PinSessionRequest,
     credentials: HTTPAuthorizationCredentials = Security(security)
@@ -141,6 +147,7 @@ async def pin_session(
 
 
 @app.post("/api/v1/switch/route", response_model=RouteResponse)
+@track_request_metrics("switch", "/api/v1/switch/route", "POST")
 async def get_route(req: RouteRequest):
     """
     Get routing decision for a request
@@ -183,6 +190,7 @@ async def get_route(req: RouteRequest):
 
 
 @app.get("/api/v1/switch/sessions", response_model=List[SessionInfo])
+@track_request_metrics("switch", "/api/v1/switch/sessions", "GET")
 async def list_sessions():
     """List all pinned sessions"""
     sessions = []
@@ -204,6 +212,7 @@ async def list_sessions():
 
 
 @app.get("/api/v1/switch/sessions/{session_id}")
+@track_request_metrics("switch", "/api/v1/switch/sessions/{session_id}", "GET")
 async def get_session(session_id: str):
     """Get info about a specific session"""
     for info in pinned_sessions.values():
@@ -214,6 +223,7 @@ async def get_session(session_id: str):
 
 
 @app.delete("/api/v1/switch/pin/{session_id}")
+@track_request_metrics("switch", "/api/v1/switch/pin/{session_id}", "DELETE")
 async def unpin_session(
     session_id: str,
     credentials: HTTPAuthorizationCredentials = Security(security)
