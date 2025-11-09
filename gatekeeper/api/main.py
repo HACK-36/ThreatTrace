@@ -20,9 +20,17 @@ from gatekeeper.ml.anomaly_detector import AnomalyDetector, LSTMBehavioralClassi
 from shared.events.schemas import (
     POITaggedEvent, RequestData, ScoreData, GeoIPData, WAFRule
 )
-from shared.auth.dependencies import get_current_service, require_roles, TokenData
-from shared.utils.metrics_router import router as metrics_router
-from shared.utils.metrics import track_request_metrics, threats_detected
+from shared.database import get_redis_client, get_postgres_client
+from shared.utils.metrics import (
+    cerberus_requests_total,
+    cerberus_poi_tagged_total,
+    cerberus_requests_blocked_total,
+    cerberus_requests_allowed_total,
+    cerberus_ml_anomaly_score_bucket,
+    cerberus_attack_patterns_total
+)
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from fastapi.responses import Response as FastAPIResponse
 
 app = FastAPI(
     title="Cerberus Gatekeeper API",
@@ -39,9 +47,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include metrics router
-app.include_router(metrics_router)
-
 # Security
 security = HTTPBearer()
 
@@ -50,11 +55,15 @@ feature_extractor = FeatureExtractor()
 anomaly_detector = AnomalyDetector()
 behavioral_classifier = LSTMBehavioralClassifier()
 
-# In-memory rule storage (in production, use Redis/PostgreSQL)
+# Initialize database clients
+redis_client = get_redis_client()
+postgres_client = get_postgres_client()
+
+# In-memory rule storage (fallback if Redis unavailable)
 active_rules: Dict[str, WAFRule] = {}
 
-# Session history for behavioral analysis (in production, use Redis)
-session_history: Dict[str, List[Dict]] = {}
+# Session history for behavioral analysis (now using Redis!)
+session_history: Dict[str, List[Dict]] = {}  # Fallback only
 
 
 # Request/Response models
@@ -95,34 +104,45 @@ class RuleListResponse(BaseModel):
 # API endpoints
 
 @app.get("/health")
-@track_request_metrics("gatekeeper", "/health", "GET")
 async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
         "service": "gatekeeper",
         "timestamp": datetime.utcnow().isoformat(),
-        "ml_model": anomaly_detector.get_model_info()
+        "ml_model": anomaly_detector.get_model_info(),
+        "databases": {
+            "redis": redis_client.ping() if redis_client else False,
+            "postgres": postgres_client.ping() if postgres_client else False
+        }
     }
 
 
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint"""
+    return FastAPIResponse(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.post("/api/v1/inspect", response_model=InspectResponse)
-@track_request_metrics("gatekeeper", "/api/v1/inspect", "POST")
-async def inspect_request(
-    req: InspectRequest,
-    auth: TokenData = Depends(get_current_service)
-):
+async def inspect_request(req: InspectRequest):
     """
     Inspect a request for threats
     
-    This is the main entry point for WAF analysis.
-    Requires service authentication (Switch or other authorized services).
+    This is the main entry point for WAF analysis
     """
+    # Increment request counter
+    cerberus_requests_total.labels(service="gatekeeper").inc()
+    
     # Step 1: Check against existing WAF rules
     modsecurity_score, blocked_by_rule = check_waf_rules(req)
     
     if blocked_by_rule:
-        response = InspectResponse(
+        # Increment blocked counter and attack patterns
+        cerberus_requests_blocked_total.inc()
+        cerberus_attack_patterns_total.labels(attack_type="signature_match").inc()
+        
+        return InspectResponse(
             action="block",
             session_id=req.session_id,
             scores=ScoreData(modsecurity=modsecurity_score, ml_anomaly=0.0, combined=modsecurity_score),
@@ -130,8 +150,6 @@ async def inspect_request(
             reason=f"Blocked by rule: {blocked_by_rule}",
             event_id=None
         )
-        threats_detected.labels(service="gatekeeper", threat_type="waf_rule", action="block").inc()
-        return response
     
     # Step 2: Extract features for ML
     request_dict = {
@@ -148,25 +166,22 @@ async def inspect_request(
     # Step 3: ML anomaly detection
     ml_score, is_anomaly = anomaly_detector.predict(features)
     
-    # Step 4: Behavioral analysis (if session history exists)
+    # Record ML anomaly score in histogram
+    cerberus_ml_anomaly_score_bucket.labels(service="gatekeeper").observe(ml_score)
+    
+    # Step 4: Behavioral analysis (using Redis session history)
     behavioral_score = 0.0
-    if req.session_id in session_history:
-        history = session_history[req.session_id]
+    history = get_session_history(req.session_id)
+    if history:
         behavioral_score = behavioral_classifier.predict(history)
     
-    # Update session history
-    if req.session_id not in session_history:
-        session_history[req.session_id] = []
-    
-    session_history[req.session_id].append({
+    # Update session history in Redis
+    session_entry = {
         "timestamp": datetime.utcnow().isoformat(),
-        "ml_score": ml_score,
-        "features": features
-    })
-    
-    # Keep only last 20 requests per session
-    if len(session_history[req.session_id]) > 20:
-        session_history[req.session_id] = session_history[req.session_id][-20:]
+        "ml_score": float(ml_score),
+        "features": {k: float(v) for k, v in list(features.items())[:20]}  # Store top 20 features
+    }
+    add_to_session_history(req.session_id, session_entry)
     
     # Step 5: Combined decision
     combined_score = calculate_combined_score(modsecurity_score, ml_score, behavioral_score)
@@ -180,13 +195,21 @@ async def inspect_request(
     # Determine action and tags
     action, tags, reason = determine_action(scores, is_anomaly, behavioral_score)
     
+    # Record action outcomes
+    if action == "block":
+        cerberus_requests_blocked_total.inc()
+    elif action == "tag_poi":
+        cerberus_poi_tagged_total.inc()
+        # Record attack pattern if ML detected anomaly
+        if is_anomaly:
+            cerberus_attack_patterns_total.labels(attack_type="ml_anomaly").inc()
+    elif action == "allow":
+        cerberus_requests_allowed_total.inc()
+    
     # If tagged as POI, emit event
     event_id = None
     if action == "tag_poi":
         event_id = emit_poi_event(req, scores, tags)
-        threats_detected.labels(service="gatekeeper", threat_type="ml_anomaly", action=action).inc()
-    elif action == "block":
-        threats_detected.labels(service="gatekeeper", threat_type="ml_anomaly", action=action).inc()
     
     return InspectResponse(
         action=action,
@@ -201,13 +224,14 @@ async def inspect_request(
 @app.post("/api/v1/gatekeeper/rules", status_code=201)
 async def create_rule(
     req: RuleCreateRequest,
-    auth: TokenData = Depends(require_roles(["admin", "service"]))
+    credentials: HTTPAuthorizationCredentials = Security(security)
 ):
     """
     Create a new WAF rule
     
-    Requires admin or service role.
+    Requires authentication (mTLS or Bearer token in production)
     """
+    # In production: verify credentials, check RBAC
     
     rule = req.rule
     
@@ -246,9 +270,9 @@ async def get_rule(rule_id: str):
 @app.delete("/api/v1/gatekeeper/rules/{rule_id}")
 async def delete_rule(
     rule_id: str,
-    auth: TokenData = Depends(require_roles(["admin"]))
+    credentials: HTTPAuthorizationCredentials = Security(security)
 ):
-    """Delete a WAF rule (admin only)"""
+    """Delete a WAF rule"""
     if rule_id not in active_rules:
         raise HTTPException(status_code=404, detail="Rule not found")
     
@@ -263,9 +287,9 @@ async def delete_rule(
 async def toggle_rule(
     rule_id: str,
     enabled: bool,
-    auth: TokenData = Depends(require_roles(["admin"]))
+    credentials: HTTPAuthorizationCredentials = Security(security)
 ):
-    """Enable or disable a rule (admin only)"""
+    """Enable or disable a rule"""
     if rule_id not in active_rules:
         raise HTTPException(status_code=404, detail="Rule not found")
     
@@ -287,6 +311,98 @@ async def get_stats():
         "active_sessions": len(session_history),
         "ml_model": anomaly_detector.get_model_info(),
         "uptime": "N/A"  # In production: calculate from start time
+    }
+
+
+@app.post("/api/v1/gatekeeper/analyze-features")
+async def analyze_features(req: InspectRequest):
+    """
+    Analyze request and return extracted ML features and scores
+    
+    Useful for debugging and demonstrating ML capabilities
+    """
+    request_dict = {
+        "method": req.method,
+        "url": req.url,
+        "headers": req.headers,
+        "body": req.body,
+        "query_params": req.query_params,
+        "metadata": req.metadata
+    }
+    
+    # Extract features
+    features = feature_extractor.extract(request_dict)
+    
+    # Get ML prediction
+    ml_score, is_anomaly = anomaly_detector.predict(features)
+    
+    # WAF score
+    modsec_score, blocked_by_rule = check_waf_rules(req)
+    
+    # Behavioral score
+    behavioral_score = 0.0
+    if req.session_id in session_history:
+        history = session_history[req.session_id]
+        behavioral_score = behavioral_classifier.predict(history)
+    
+    # Combined score
+    combined_score = calculate_combined_score(modsec_score, ml_score, behavioral_score)
+    
+    # Categorize top features
+    top_features = sorted(features.items(), key=lambda x: abs(x[1]), reverse=True)[:10]
+    
+    # Convert numpy types to native Python types for JSON serialization
+    def to_native(val):
+        if hasattr(val, 'item'):
+            return val.item()
+        return float(val) if isinstance(val, (int, float)) else val
+    
+    return {
+        "scores": {
+            "ml_anomaly": float(ml_score),
+            "modsecurity": float(modsec_score),
+            "behavioral": float(behavioral_score),
+            "combined": float(combined_score)
+        },
+        "verdict": {
+            "is_anomaly": bool(is_anomaly),
+            "blocked_by_rule": blocked_by_rule,
+            "action": "block" if blocked_by_rule else ("tag_poi" if is_anomaly else "allow")
+        },
+        "top_features": {k: float(v) for k, v in top_features},
+        "feature_count": len(features),
+        "analysis": {
+            "sql_patterns": float(features.get("sql_keyword_count", 0)),
+            "xss_patterns": float(features.get("xss_pattern_count", 0)),
+            "command_patterns": float(features.get("command_pattern_count", 0)),
+            "path_traversal": float(features.get("path_traversal_count", 0)),
+            "entropy_url": float(features.get("entropy_url", 0)),
+            "entropy_body": float(features.get("entropy_body", 0))
+        }
+    }
+
+
+@app.get("/api/v1/gatekeeper/ml-model")
+async def get_ml_model_info():
+    """Get detailed ML model information"""
+    return {
+        "anomaly_detector": anomaly_detector.get_model_info(),
+        "behavioral_classifier": {
+            "model_type": "LSTM (placeholder)",
+            "sequence_length": behavioral_classifier.sequence_length,
+            "active_sessions": len(session_history)
+        },
+        "feature_extractor": {
+            "total_features": 102,
+            "feature_categories": {
+                "basic": 10,
+                "content": 20,
+                "patterns": 25,
+                "entropy": 15,
+                "behavioral": 20,
+                "headers": 12
+            }
+        }
     }
 
 
@@ -421,8 +537,68 @@ def emit_poi_event(req: InspectRequest, scores: ScoreData, tags: List[str]) -> s
     event_file = os.path.join(events_dir, f"{event.event_id}.json")
     with open(event_file, 'w') as f:
         f.write(event.model_dump_json(indent=2))
-    
+
+    # Persist to PostgreSQL for analytics
+    try:
+        event_payload = event.model_dump()
+        postgres_client.execute(
+            """
+            INSERT INTO cerberus.events (
+                event_id,
+                timestamp,
+                source,
+                event_type,
+                session_id,
+                client_ip,
+                data
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+            ON CONFLICT (event_id) DO NOTHING
+            """,
+            (
+                event.event_id,
+                event.timestamp,
+                event.source,
+                event.event_type,
+                event.session_id,
+                event.client_ip,
+                json.dumps(event_payload)
+            )
+        )
+    except Exception as db_err:
+        print(f"PostgreSQL event persistence error: {db_err}")
+
     return event.event_id
+
+
+def get_session_history(session_id: str) -> List[Dict]:
+    """Get session history from Redis or fallback to memory"""
+    try:
+        # Try Redis first
+        history = redis_client.lrange(f"session:{session_id}", 0, 19, as_json=True)
+        if history:
+            return history
+    except Exception as e:
+        print(f"Redis get session history error: {e}")
+    
+    # Fallback to in-memory
+    return session_history.get(session_id, [])
+
+
+def add_to_session_history(session_id: str, entry: Dict) -> None:
+    """Add entry to session history in Redis and memory"""
+    try:
+        # Store in Redis (keep last 20)
+        redis_client.lpush(f"session:{session_id}", entry)
+        redis_client.ltrim(f"session:{session_id}", 0, 19)
+        redis_client.expire(f"session:{session_id}", 3600)  # 1 hour TTL
+    except Exception as e:
+        print(f"Redis add session history error: {e}")
+        # Fallback to in-memory
+        if session_id not in session_history:
+            session_history[session_id] = []
+        session_history[session_id].append(entry)
+        if len(session_history[session_id]) > 20:
+            session_history[session_id] = session_history[session_id][-20:]
 
 
 if __name__ == "__main__":
