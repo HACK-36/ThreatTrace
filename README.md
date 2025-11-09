@@ -1,4 +1,18 @@
+<p align="center">
+</p>
+
+[![Built at Hack36](https://raw.githubusercontent.com/nihal2908/Hack-36-Readme-Template/main/BUILT-AT-Hack36-9-Secure.png)](https://raw.githubusercontent.com/nihal2908/Hack-36-Readme-Template/main/BUILT-AT-Hack36-9-Secure.png)
+
+
 # Project Cerberus 🛡️
+TeamName-WAIT_FOR_IT
+
+Team Members:-
+
+Rishi Raj Jaiswal
+Ananya Singh
+Gaurav Mishra
+Devansh Jain
 
 **Production-Grade Active-Defense Security Fabric**
 
@@ -11,6 +25,8 @@ Cerberus unifies a WAF, transparent session router, digital evidence locker, and
 - Structured logging + Prometheus metrics + Grafana dashboards out of the box
 - Deployment automation via Docker Compose, Kubernetes manifests, and Helm chart
 
+Public Presentaion Link:https://docs.google.com/presentation/d/1md_MmefVnDpIFr5HVeKeMgTpmvd0NXoV/edit?usp=drivesdk&ouid=117890272130517673366&rtpof=true&sd=true
+Video Link:https://www.youtube.com/watch?v=TOF8So67Bqc
 ## 🔧 Environment Variables
 
 ### Required Configuration
