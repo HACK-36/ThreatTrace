@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from typing import List, Dict, Optional
 import sys
 import os
-import time
 from datetime import datetime
 import json
 import re
@@ -18,10 +17,12 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from labyrinth.decoy_gen.data_generator import get_generator
 from shared.events.schemas import PayloadCapturedEvent, RequestData, PayloadData
-from shared.utils.metrics_router import router as metrics_router
-from shared.utils.metrics import track_request_metrics
-from labyrinth.capture.session_tracker import get_session_tracker
-from shared.evidence.models import EvidencePointer
+from shared.utils.metrics import (
+    cerberus_requests_total,
+    cerberus_payloads_captured_total
+)
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from fastapi.responses import Response as FastAPIResponse
 
 app = FastAPI(
     title="ACME Corp Internal Portal",  # Fake company name
@@ -37,9 +38,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include metrics router
-app.include_router(metrics_router)
-
 # Generate decoy data
 generator = get_generator()
 FAKE_USERS = generator.generate_users(100)
@@ -50,9 +48,6 @@ FAKE_TRANSACTIONS = generator.generate_transactions(200)
 # Capture storage
 EVIDENCE_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'captures')
 os.makedirs(EVIDENCE_DIR, exist_ok=True)
-
-# Evidence session tracker
-session_tracker = get_session_tracker()
 
 
 # Models
@@ -68,16 +63,15 @@ class CreateUserRequest(BaseModel):
     role: str = "user"
 
 
-class FinalizeSessionRequest(BaseModel):
-    session_id: Optional[str] = None
-
-
 # Middleware for request capture
 
 @app.middleware("http")
 async def capture_middleware(request: Request, call_next):
     """Capture all requests for analysis"""
-    start_time = time.time()
+    
+    # Increment request counter
+    cerberus_requests_total.labels(service="labyrinth").inc()
+    
     # Read request body
     body_bytes = await request.body()
     body_str = body_bytes.decode('utf-8', errors='ignore')
@@ -92,18 +86,8 @@ async def capture_middleware(request: Request, call_next):
         "headers": dict(request.headers),
         "body": body_str,
         "client_ip": request.client.host,
-        "session": request.headers.get("X-Session-Id")
+        "session": request.headers.get("X-Session-Fingerprint", "unknown")
     }
-    session_id = capture["session"] or request.headers.get("X-Session-Fingerprint") or capture["client_ip"] or "unknown"
-    capture["session"] = session_id
-    user_agent = capture["headers"].get("user-agent", "unknown")
-    event_id = f"evt_{int(time.time())}_{session_id[:8]}"
-    builder = session_tracker.get_or_create_session(
-        session_id=session_id,
-        event_id=event_id,
-        attacker_ip=capture["client_ip"],
-        user_agent=user_agent
-    )
     
     # Extract potential attack payloads
     payloads = extract_payloads(capture)
@@ -114,44 +98,12 @@ async def capture_middleware(request: Request, call_next):
     # Emit event if payloads detected
     if payloads:
         emit_payload_event(capture, payloads, capture_id)
+        # Increment payloads captured counter
+        cerberus_payloads_captured_total.inc()
     
     # Process request
     response = await call_next(request)
-
-    duration_ms = (time.time() - start_time) * 1000
-    response_status = response.status_code
-    response_headers = dict(response.headers)
-    response_body = ""
-    if hasattr(response, "body") and response.body is not None:
-        try:
-            response_body = response.body.decode('utf-8', errors='ignore')[:10000]
-        except AttributeError:
-            pass
-
-    try:
-        builder.add_har_entry(
-            method=capture["method"],
-            url=capture["url"],
-            request_headers=capture["headers"],
-            request_body=capture["body"],
-            response_status=response_status,
-            response_headers=response_headers,
-            response_body=response_body,
-            start_time=datetime.utcnow(),
-            duration_ms=duration_ms
-        )
-        for payload in payloads:
-            builder.add_payload(
-                payload_type=payload.type,
-                payload_value=payload.value,
-                location=payload.location,
-                confidence=payload.confidence,
-                save_as_file=len(payload.value) > 100
-            )
-            builder.add_tag(payload.type)
-    finally:
-        session_tracker.cleanup_expired_sessions()
-
+    
     return response
 
 
@@ -235,7 +187,6 @@ async def fake_login(req: LoginRequest):
 
 
 @app.get("/api/v1/users")
-@track_request_metrics("labyrinth", "/api/v1/users", "GET")
 async def get_users(limit: int = 10, role: Optional[str] = None):
     """Fake users API - returns synthetic data"""
     users = FAKE_USERS[:limit]
@@ -250,7 +201,6 @@ async def get_users(limit: int = 10, role: Optional[str] = None):
 
 
 @app.get("/api/v1/users/{user_id}")
-@track_request_metrics("labyrinth", "/api/v1/users/{user_id}", "GET")
 async def get_user(user_id: str):
     """Get specific user"""
     for user in FAKE_USERS:
@@ -261,7 +211,6 @@ async def get_user(user_id: str):
 
 
 @app.post("/api/v1/users")
-@track_request_metrics("labyrinth", "/api/v1/users", "POST")
 async def create_user(req: CreateUserRequest):
     """Fake user creation"""
     new_user = {
@@ -280,7 +229,6 @@ async def create_user(req: CreateUserRequest):
 
 
 @app.get("/api/v1/documents")
-@track_request_metrics("labyrinth", "/api/v1/documents", "GET")
 async def get_documents():
     """Fake documents API"""
     return {
@@ -290,7 +238,6 @@ async def get_documents():
 
 
 @app.get("/api/v1/documents/{doc_id}/download")
-@track_request_metrics("labyrinth", "/api/v1/documents/{doc_id}/download", "GET")
 async def download_document(doc_id: str):
     """Fake document download"""
     # Return fake PDF content
@@ -302,7 +249,6 @@ async def download_document(doc_id: str):
 
 
 @app.post("/api/v1/upload")
-@track_request_metrics("labyrinth", "/api/v1/upload", "POST")
 async def upload_file(file: UploadFile = File(...)):
     """File upload endpoint - captures uploaded files"""
     # Read file content
@@ -330,7 +276,6 @@ async def upload_file(file: UploadFile = File(...)):
 
 
 @app.get("/admin", response_class=HTMLResponse)
-@track_request_metrics("labyrinth", "/admin", "GET")
 async def admin_panel():
     """Fake admin panel"""
     return """
@@ -354,7 +299,6 @@ async def admin_panel():
 
 
 @app.get("/admin/config")
-@track_request_metrics("labyrinth", "/admin/config", "GET")
 async def admin_config():
     """Fake config endpoint - exposes fake credentials"""
     return {
@@ -369,7 +313,6 @@ async def admin_config():
 
 
 @app.get("/.env")
-@track_request_metrics("labyrinth", "/.env", "GET")
 async def fake_env_file():
     """Fake .env file disclosure"""
     env_content = """# ACME Corp Configuration (FAKE)
@@ -383,7 +326,6 @@ SECRET_KEY=super-secret-key-do-not-share
 
 
 @app.get("/health")
-@track_request_metrics("labyrinth", "/health", "GET")
 async def health():
     """Health check"""
     return {
@@ -394,37 +336,10 @@ async def health():
     }
 
 
-@app.get("/internal/sessions")
-async def list_sessions():
-    """List active evidence collection sessions (internal use)"""
-    session_ids = session_tracker.list_session_ids()
-    return {
-        "active_count": len(session_ids),
-        "sessions": session_ids
-    }
-
-
-@app.post("/internal/finalize-session")
-async def finalize_session_endpoint(req: FinalizeSessionRequest):
-    """Finalize a session and trigger evidence upload"""
-    session_id = req.session_id
-    if not session_id:
-        return JSONResponse(
-            status_code=400,
-            content={"detail": "session_id is required"}
-        )
-
-    pointer: Optional[EvidencePointer] = session_tracker.finalize_session(session_id)
-    if not pointer:
-        return JSONResponse(
-            status_code=404,
-            content={"detail": f"Session '{session_id}' not found"}
-        )
-
-    return {
-        "session_id": session_id,
-        "pointer": pointer.model_dump()
-    }
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint"""
+    return FastAPIResponse(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # Helper functions
