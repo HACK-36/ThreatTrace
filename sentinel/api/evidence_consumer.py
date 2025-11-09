@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 class EvidenceConsumer:
     """
     Consumes evidence pointers and triggers Sentinel analysis pipeline
-    
     Workflow:
     1. Subscribe to cerberus.evidence.ready topic
     2. Receive evidence pointer
@@ -92,7 +91,6 @@ class EvidenceConsumer:
             message: Evidence pointer dict from Kafka
         """
         try:
-            # Parse evidence pointer
             pointer = EvidencePointer.model_validate(message)
             
             logger.info(
@@ -101,20 +99,17 @@ class EvidenceConsumer:
                 f"payloads={pointer.payload_count}"
             )
             
-            # Download evidence package
             evidence = self.retriever.retrieve(pointer)
             
             if not evidence["valid"]:
                 logger.warning(f"Evidence validation failed for {pointer.event_id}")
             
-            # Call handler if provided
+            
             if self.handler:
                 self.handler(pointer, evidence)
             else:
                 logger.info(f"No handler configured for evidence {pointer.event_id}")
             
-            # Cleanup evidence workspace after processing
-            # (handler should process synchronously or copy needed data)
             self.retriever.cleanup(evidence["workspace"])
             
         except Exception as e:
@@ -154,7 +149,6 @@ def create_analysis_handler(
             
             logger.info(f"Processing evidence {event_id} through analysis pipeline")
             
-            # Extract HAR log and metadata
             har_log = evidence.get("har_log")
             metadata = evidence.get("metadata")
             
@@ -162,8 +156,7 @@ def create_analysis_handler(
                 logger.warning(f"Incomplete evidence for {event_id}")
                 return
             
-            # Step 1: Behavioral Profiling
-            # Convert HAR entries to capture format for profiler
+            
             captures = []
             for entry in har_log.entries:
                 captures.append({
@@ -175,7 +168,6 @@ def create_analysis_handler(
             
             profile = profiler.profile_session(session_id, captures)
             
-            # Store profile
             storage_dict[f"profile_{session_id}"] = {
                 "session_id": session_id,
                 "profile": profile.model_dump(),
@@ -188,24 +180,16 @@ def create_analysis_handler(
                 f"sophistication={profile.sophistication_score:.2f}"
             )
             
-            # Step 2: Queue simulations for each payload
-            # Extract payloads from metadata
             session_meta = metadata.session_metadata
             
-            # In real implementation, payloads would be in evidence
-            # For now, we can trigger simulation based on tags
             if "sql_injection" in pointer.tags:
                 logger.info(f"SQL injection detected in {event_id}, queuing simulation")
-                # Simulation would be queued via simulator
             
             if "xss" in pointer.tags:
                 logger.info(f"XSS detected in {event_id}, queuing simulation")
             
-            # Step 3: Generate preliminary rules
-            # Rules can be generated even before full simulation
             if profile.sophistication_score >= 7.0:
                 logger.info(f"High sophistication attack, generating proactive rules")
-                # Rule generation would happen here
             
             logger.info(f"Evidence processing complete for {event_id}")
             
@@ -215,7 +199,6 @@ def create_analysis_handler(
     return handler
 
 
-# Global consumer instance
 _evidence_consumer: Optional[EvidenceConsumer] = None
 
 

@@ -202,19 +202,15 @@ class BehavioralProfiler:
                 score += 2.0
                 break
         
-        # Tool signatures (0-2 points)
         user_agents = [c.get("headers", {}).get("User-Agent", "") for c in captures]
         if any("sqlmap" in ua.lower() or "nikto" in ua.lower() for ua in user_agents):
-            score += 1.0  # Automated tool = less sophisticated
+            score += 1.0 
         else:
-            score += 2.0  # Manual/custom tool = more sophisticated
+            score += 2.0 
         
-        # Targeted behavior (0-3 points)
         if len(captures) < 10:
-            # Few targeted requests
             score += 3.0
         elif len(captures) > 50:
-            # Spray-and-pray
             score += 1.0
         else:
             score += 2.0
@@ -243,7 +239,7 @@ class BehavioralProfiler:
     
     def _generate_summary(self, actions: List[str], ttps: List[str], intent: str) -> str:
         """Generate human-readable summary"""
-        action_summary = ", ".join(set(actions[:5]))  # First 5 unique actions
+        action_summary = ", ".join(set(actions[:5])) 
         ttp_summary = ", ".join(ttps[:3]) if ttps else "None"
         
         summary = (
@@ -281,10 +277,8 @@ class BehavioralProfiler:
             Updated profiles with cluster_id assigned
         """
         if len(profiles) < 3:
-            # Need at least 3 for meaningful clustering
             return profiles
         
-        # Create feature vectors from profiles
         features = []
         for profile in profiles:
             feature_vector = [
@@ -298,13 +292,10 @@ class BehavioralProfiler:
         
         X = np.array(features)
         
-        # Normalize features
         X_normalized = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-8)
         
-        # Cluster with DBSCAN
         clustering = DBSCAN(eps=0.5, min_samples=2).fit(X_normalized)
         
-        # Assign cluster IDs
         for i, profile in enumerate(profiles):
             profile["cluster_id"] = int(clustering.labels_[i])
         
