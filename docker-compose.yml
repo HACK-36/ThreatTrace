@@ -83,8 +83,6 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - REDIS_URL=redis://redis:6379
       - POSTGRES_URL=postgresql://cerberus:cerberus_password@postgres:5432/cerberus
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-cerberus-dev-secret-change-in-production}
-      - GATEKEEPER_API_KEY=${GATEKEEPER_API_KEY:-gatekeeper-dev-key-change-me}
     depends_on:
       - kafka
       - redis
@@ -94,7 +92,6 @@ services:
     volumes:
       - ./data:/app/data
       - ./gatekeeper:/app/gatekeeper
-      - ./shared:/app/shared
 
   # Switch (Session Router)
   switch:
@@ -108,8 +105,6 @@ services:
       - REDIS_URL=redis://redis:6379
       - PRODUCTION_BACKEND=http://production-backend:8080
       - LABYRINTH_BACKEND=http://labyrinth:8002
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-cerberus-dev-secret-change-in-production}
-      - SWITCH_API_KEY=${SWITCH_API_KEY:-switch-dev-key-change-me}
     depends_on:
       - redis
       - labyrinth
@@ -117,7 +112,6 @@ services:
       - cerberus-net
     volumes:
       - ./data:/app/data
-      - ./shared:/app/shared
 
   # Labyrinth (Honeypot)
   labyrinth:
@@ -132,8 +126,6 @@ services:
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=cerberus
       - MINIO_SECRET_KEY=cerberus_minio_password
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-cerberus-dev-secret-change-in-production}
-      - LABYRINTH_API_KEY=${LABYRINTH_API_KEY:-labyrinth-dev-key-change-me}
     depends_on:
       - kafka
       - minio
@@ -142,7 +134,6 @@ services:
       - labyrinth-isolated  # Isolated network for honeypot
     volumes:
       - ./data:/app/data
-      - ./shared:/app/shared
 
   # Sentinel (Threat Twin AI)
   sentinel:
@@ -156,22 +147,14 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - POSTGRES_URL=postgresql://cerberus:cerberus_password@postgres:5432/cerberus
       - GATEKEEPER_API_URL=http://gatekeeper:8000
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=cerberus
-      - MINIO_SECRET_KEY=cerberus_minio_password
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-cerberus-dev-secret-change-in-production}
-      - SENTINEL_API_KEY=${SENTINEL_API_KEY:-sentinel-dev-key-change-me}
-      - GATEKEEPER_API_KEY=${GATEKEEPER_API_KEY:-gatekeeper-dev-key-change-me}
     depends_on:
       - kafka
       - postgres
       - gatekeeper
-      - minio
     networks:
       - cerberus-net
     volumes:
       - ./data:/app/data
-      - ./shared:/app/shared
       - /var/run/docker.sock:/var/run/docker.sock  # For sandbox provisioning
     privileged: true  # Required for Docker-in-Docker
 
@@ -214,33 +197,8 @@ services:
       - cerberus-net
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./infrastructure/grafana/dashboards:/etc/grafana/provisioning/dashboards
-      - ./infrastructure/grafana/datasources:/etc/grafana/provisioning/datasources
-
-  # Redis Exporter
-  redis-exporter:
-    image: oliver006/redis_exporter:latest
-    container_name: cerberus-redis-exporter
-    environment:
-      - REDIS_ADDR=redis:6379
-    ports:
-      - "9121:9121"
-    networks:
-      - cerberus-net
-    depends_on:
-      - redis
-
-  # Kafka Exporter
-  kafka-exporter:
-    image: danielqsj/kafka-exporter:latest
-    container_name: cerberus-kafka-exporter
-    command: ["--kafka.server=kafka:29092"]
-    ports:
-      - "9308:9308"
-    networks:
-      - cerberus-net
-    depends_on:
-      - kafka
+      - ./infrastructure/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./infrastructure/grafana/datasources:/etc/grafana/provisioning/datasources:ro
 
 networks:
   cerberus-net:

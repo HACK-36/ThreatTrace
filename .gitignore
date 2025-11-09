@@ -27,8 +27,6 @@ env/
 ENV/
 .venv
 
-node_modules/
-dashboard/node_modules/
 # IDE
 .vscode/
 .idea/
@@ -42,6 +40,7 @@ dashboard/node_modules/
 
 # Node / Frontend
 node_modules/
+dashboard/node_modules/
 .next/
 .nuxt/
 .svelte-kit/
@@ -87,6 +86,7 @@ logs/
 .dockerignore
 
 # Environment
+.env
 .env.local
 .env.*.local
 
